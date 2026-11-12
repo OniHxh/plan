@@ -224,8 +224,50 @@ const GOAL_E=['🛟','🚗','✈️','🏠','💍','💻','🎓','🏍️','🎁
 function blank(){return{v:1,setup:false,step:0,name:'',salary:'',payDay:'',extras:[],accounts:[],snaps:{},checks:{},charges:[],budgets:{},goals:[],dismiss:{},settings:{safety:3},lastExport:null,created:today(),wishes:[],stats:{goalsDone:0,aboRemoved:0,dropped:0,droppedAmt:0,bought:0,green:0},badgesSeen:{},discreet:false,reminder:false,recapSeen:null}}
 function load(){try{const s=JSON.parse(localStorage.getItem(KEY));if(s&&s.v){const o=Object.assign(blank(),s);o.settings=Object.assign(blank().settings,s.settings||{});o.stats=Object.assign(blank().stats,s.stats||{});return o}}catch(e){}
  const b=blank();b.accounts=[{id:uid(),name:'Crédit Mutuel',type:'courant'},{id:uid(),name:'Revolut',type:'courant'}];return b}
-function save(){try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){toast('Stockage plein : exporte tes données')}}
-let S=load();
+function store(){try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){toast('Stockage plein : exporte tes données')}}
+let lastBody='';
+function save(){const b=JSON.stringify(Object.assign({},S,{updatedAt:0}));if(b===lastBody&&S.updatedAt){store();return}lastBody=b;S.updatedAt=Math.max(Date.now(),(typeof SY!=='undefined'&&SY&&SY.syncedAt||0)+1);store();schedPush()}
+let S=load();lastBody=JSON.stringify(Object.assign({},S,{updatedAt:0}));
+
+/* ---------- Synchronisation chiffrée (Gist privé + AES-GCM) ---------- */
+const SKEY='plan-sync',GFILE='plan-sync.json';
+let SY=(()=>{try{return JSON.parse(localStorage.getItem(SKEY))||null}catch(e){return null}})(),syncing=false,pushT=null;
+const sySave=()=>{try{SY?localStorage.setItem(SKEY,JSON.stringify(SY)):localStorage.removeItem(SKEY)}catch(e){}};
+const b64=u=>{u=new Uint8Array(u);let s='';for(let i=0;i<u.length;i+=8192)s+=String.fromCharCode.apply(null,u.subarray(i,i+8192));return btoa(s)};
+const unb64=x=>Uint8Array.from(atob(x),c=>c.charCodeAt(0));
+async function kdf(pass,salt){const k=await crypto.subtle.importKey('raw',new TextEncoder().encode(pass),'PBKDF2',false,['deriveKey']);return crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations:250000,hash:'SHA-256'},k,{name:'AES-GCM',length:256},false,['encrypt','decrypt'])}
+async function enc(obj,pass){const salt=crypto.getRandomValues(new Uint8Array(16)),iv=crypto.getRandomValues(new Uint8Array(12)),key=await kdf(pass,salt),ct=await crypto.subtle.encrypt({name:'AES-GCM',iv},key,new TextEncoder().encode(JSON.stringify(obj)));return{app:'plan',v:1,updated:obj.updatedAt||Date.now(),salt:b64(salt),iv:b64(iv),ct:b64(ct)}}
+async function dec(p,pass){let pt;try{const key=await kdf(pass,unb64(p.salt));pt=await crypto.subtle.decrypt({name:'AES-GCM',iv:unb64(p.iv)},key,unb64(p.ct))}catch(e){throw new Error('pass')}return JSON.parse(new TextDecoder().decode(pt))}
+async function gh(path,opt={}){const r=await fetch('https://api.github.com'+path,Object.assign({},opt,{cache:'no-store',headers:{Authorization:'Bearer '+SY.token,Accept:'application/vnd.github+json','Content-Type':'application/json'}}));if(r.status===401||r.status===403)throw new Error('token');if(!r.ok)throw new Error('http');return r.json()}
+async function findGist(){for(let pg=1;pg<=5;pg++){const l=await gh(`/gists?per_page=100&page=${pg}`);const g=l.find(x=>x.files&&x.files[GFILE]);if(g)return g.id;if(l.length<100)break}return null}
+async function readRemote(){const g=await gh('/gists/'+SY.gistId);const f=g.files&&g.files[GFILE];if(!f)return null;let c=f.content;if(f.truncated)c=await(await fetch(f.raw_url,{cache:'no-store'})).text();return JSON.parse(c)}
+async function writeRemote(){const p=await enc(S,SY.pass),body={files:{[GFILE]:{content:JSON.stringify(p)}}};
+ if(SY.gistId)await gh('/gists/'+SY.gistId,{method:'PATCH',body:JSON.stringify(body)});
+ else{const g=await gh('/gists',{method:'POST',body:JSON.stringify(Object.assign({description:'Plan · sauvegarde chiffrée',public:false},body))});SY.gistId=g.id}
+ SY.syncedAt=p.updated;SY.last=Date.now();SY.err=null;sySave()}
+function useState(st){S=Object.assign(blank(),st);S.settings=Object.assign(blank().settings,st.settings||{});S.stats=Object.assign(blank().stats,st.stats||{});lastBody=JSON.stringify(Object.assign({},S,{updatedAt:0}));store()}
+async function applyRemote(rem,quiet){const st=await dec(rem,SY.pass);useState(st);SY.syncedAt=rem.updated;SY.last=Date.now();SY.err=null;sySave();if(!$('#sheet')&&!$('#story'))render();if(!quiet)toast('☁️ Mis à jour depuis ton autre appareil')}
+function schedPush(){if(!SY||!SY.gistId)return;clearTimeout(pushT);pushT=setTimeout(syncNow,2500)}
+async function syncNow(manual){if(!SY||!SY.gistId||syncing)return;if(!navigator.onLine){if(manual)toast('Pas de connexion');return}syncing=true;
+ try{const rem=await readRemote(),ru=rem?rem.updated:0,lu=S.updatedAt||0,base=SY.syncedAt||0;
+  if(rem&&ru>base){if(lu>base&&lu!==ru){const cloud=confirm(`Plan a été modifié sur un autre appareil ET sur celui-ci.\n\nOK : garder la version de l'autre appareil (${new Date(ru).toLocaleString('fr-FR')})\nAnnuler : garder celle de cet appareil`);if(cloud)await applyRemote(rem);else await writeRemote()}else await applyRemote(rem)}
+  else if(lu>base||!rem)await writeRemote();
+  else{SY.last=Date.now();SY.err=null;sySave()}
+  if(manual)toast('☁️ Synchronisé')}
+ catch(e){SY.err=e.message;sySave();if(manual||e.message!=='http')toast(e.message==='token'?'☁️ Clé GitHub refusée : refais l\'activation':e.message==='pass'?'☁️ Phrase secrète incorrecte':'☁️ Synchro impossible pour le moment')}
+ finally{syncing=false;const x=$('#syState');if(x)x.innerHTML=syncState()}}
+function syncState(){if(!SY)return'Désactivée';if(SY.err)return`<span class="bad">Erreur : ${SY.err==='token'?'clé GitHub refusée':SY.err==='pass'?'phrase secrète incorrecte':'connexion impossible'}</span>`;if(!SY.last)return'Activée';const m=Math.round((Date.now()-SY.last)/6e4);return`<span class="ok">Activée</span> · dernière synchro ${m<1?'à l\'instant':m<60?'il y a '+m+' min':new Date(SY.last).toLocaleString('fr-FR',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}`}
+function sheetSync(){
+ if(SY&&SY.gistId)return sheetHead('☁️ Synchronisation')+`<div class="hint" id="syState">${syncState()}</div>
+ <p class="small muted">Tes données sont chiffrées sur l'appareil avec ta phrase secrète avant d'être envoyées. Les changements partent automatiquement, et chaque appareil récupère la dernière version à l'ouverture.</p>
+ <button class="btn pri block" data-a="syncGo">Synchroniser maintenant</button><button class="btn ghost danger block" style="margin-top:6px" data-a="syncOff">Désactiver sur cet appareil</button>`;
+ return sheetHead('☁️ Synchronisation')+`<div class="hint"><b>Comment ça marche</b><br>Tes données sont chiffrées sur ton appareil avec une phrase secrète, puis rangées dans un espace privé de ton compte GitHub. Sans la phrase, personne ne peut les lire, pas même GitHub.</div>
+ <ol class="small" style="padding-left:18px;margin:0 0 14px;line-height:1.5"><li style="margin-bottom:6px">Crée une clé d'accès : <a href="https://github.com/settings/tokens/new?scopes=gist&description=Plan%20sync" target="_blank" rel="noopener" style="color:var(--aci);font-weight:700">ouvrir GitHub ↗</a>. Laisse cochée seulement la case <b>gist</b>, choisis l'expiration <b>No expiration</b>, puis <b>Generate token</b>. Copie la clé (elle commence par ghp_).</li><li style="margin-bottom:6px">Colle-la ici et choisis une phrase secrète.</li><li>Sur ton autre appareil, fais pareil avec la <b>même clé</b> et la <b>même phrase secrète</b>.</li></ol>
+ <label class="f"><span>Clé GitHub</span><input class="in" id="syTok" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="ghp_…"></label>
+ <label class="f"><span>Phrase secrète (8 caractères minimum)</span><input class="in" id="syPass" type="password" autocomplete="new-password" placeholder="La même sur tous tes appareils"></label>
+ <p class="small warn">Note-la bien : si tu l'oublies, la copie en ligne devient illisible (tes données sur l'appareil restent).</p>
+ <button class="btn pri block" id="syBtn" data-a="syncOn">Activer la synchronisation</button>`}
+
 const ui={tab:'home',ck:null,af:{amt:'',mode:'once',res:null},sim:{m:0,o:0},story:null};
 
 /* ---------- Calculs ---------- */
@@ -528,7 +570,7 @@ function vSetup(){
  if(s===0)h=`<img class="logo" src="icon-192.png" alt=""><h1>Bienvenue sur Plan</h1>
   <p class="muted">On pose ta situation en quelques minutes. Ensuite, <b style="color:var(--tx)">1 minute par mois</b> suffit : tu mets à jour tes soldes, et l'app te dit si tu peux te faire plaisir ou s'il faut freiner.</p>
   <div class="hint">Pas besoin d'avoir tout sous la main. Tout ce que tu sautes maintenant, l'app te le redemandera plus tard.</div>
-  <label class="f"><span>Ton prénom</span><input class="in" data-k="name" value="${val(S.name)}" placeholder="Prénom" autocomplete="given-name"></label>${nav('Commencer')}<button class="btn ghost block" style="margin-top:8px" data-a="import">📂 J'ai déjà une sauvegarde : importer</button>`;
+  <label class="f"><span>Ton prénom</span><input class="in" data-k="name" value="${val(S.name)}" placeholder="Prénom" autocomplete="given-name"></label>${nav('Commencer')}<button class="btn block" style="margin-top:8px" data-a="syncSheet">☁️ Synchroniser avec mon autre appareil</button><button class="btn ghost block" style="margin-top:6px" data-a="import">📂 J'ai déjà une sauvegarde : importer</button>`;
  if(s===1)h=`<h1>Tes revenus</h1><p class="muted">Ton salaire net, celui qui arrive sur ton compte.</p>
   <label class="f"><span>Salaire net mensuel</span>${money('salary',S.salary,'ex. 2 100')}</label>
   <label class="f"><span>Jour de paie (1 à 31)</span><input class="in" data-k="payDay" inputmode="numeric" value="${val(S.payDay)}" placeholder="ex. 28"></label>
@@ -570,7 +612,7 @@ const budRows=()=>BUD.map(([k,e])=>`<div class="row" style="margin-bottom:8px"><
 /* ----- Accueil ----- */
 function vHome(){
  const st=status(),now=curYM(),d=deltas(),last=d[d.length-1];
- let h=`<div class="row between" style="margin-bottom:6px"><img class="mini" src="icon-192.png" alt=""><div class="grow"><div class="muted small">${greet()}${S.name?' '+esc(S.name):''}</div><h1 style="margin:2px 0 0">Plan</h1></div><button class="icon-btn" data-a="discreet" aria-label="Mode discret">${S.discreet?'🙈':'👁'}</button><button class="icon-btn" data-a="settings" aria-label="Réglages">⚙︎</button></div><div style="height:12px"></div>`;
+ let h=`<div class="row between" style="margin-bottom:6px"><img class="mini" src="icon-192.png" alt=""><div class="grow"><div class="muted small">${greet()}${S.name?' '+esc(S.name):''}</div><h1 style="margin:2px 0 0">Plan</h1></div>${SY&&SY.gistId?`<button class="icon-btn" data-a="syncSheet" aria-label="Synchronisation">${SY.err?'⚠️':'☁️'}</button>`:''}<button class="icon-btn" data-a="discreet" aria-label="Mode discret">${S.discreet?'🙈':'👁'}</button><button class="icon-btn" data-a="settings" aria-label="Réglages">⚙︎</button></div><div style="height:12px"></div>`;
  if(!S.checks[now])h+=`<button class="banner" data-a="checkin">📅 Point du mois de ${MOISL[+now.slice(5)-1]}<small>1 minute pour mettre à jour tes soldes et recevoir des conseils justes.</small></button>`;
  const rdy=S.wishes.filter(w=>w.status==='wait'&&wishLeft(w)===0).length;
  if(rdy)h+=`<button class="banner" style="background:linear-gradient(135deg,#8b5cf6,#0ea5e9)" data-a="tab" data-t="wish">🎁 ${rdy>1?rdy+' envies prêtes':'1 envie prête'} à décider<small>Le délai de réflexion est passé : décide à froid.</small></button>`;
@@ -726,6 +768,7 @@ function sheetSettings(){return sheetHead('Réglages')+`<label class="f"><span>P
  <label class="f"><span>Épargne de précaution (mois de dépenses)</span><input class="in" data-k="settings|safety" inputmode="numeric" value="${val(S.settings.safety)}"></label>
  <h2>Extras</h2><button class="btn block" style="margin-bottom:8px" data-a="reminder">⏰ ${S.reminder?'Réinstaller':'Activer'} le rappel mensuel (calendrier)</button>
  <div class="grid2"><button class="btn" data-a="badges">🏅 Mes badges</button><button class="btn" data-a="recap">✨ Bilan ${recapYear()}</button></div>
+ <h2>Synchronisation</h2><button class="btn block" style="margin-bottom:8px;justify-content:space-between" data-a="syncSheet"><span>☁️ Téléphone ↔ Mac</span><span class="small muted" style="font-weight:500">${SY&&SY.gistId?(SY.err?'⚠️ Erreur':'Activée'):'Désactivée'}</span></button>
  <h2>Sauvegarde</h2><div class="hint">Tes données restent uniquement sur cet appareil. Pour les transférer (téléphone ↔ PC) ou les mettre à l'abri : exporte le fichier, puis importe-le sur l'autre appareil.</div>
  <div class="grid2"><button class="btn" data-a="export">Exporter</button><button class="btn" data-a="import">Importer</button></div>
  <button class="btn ghost block" data-a="redoSetup">Relancer la configuration guidée</button>
@@ -770,7 +813,7 @@ const A={
  dismiss(el){S.dismiss[el.dataset.k]=true;save();render()},
  export(){exportData()},import(){$('#importIn').click()},
  redoSetup(){S.setup=false;S.step=0;closeSheetSilent();save();render()},
- reset(){if(!confirm('Effacer toutes tes données ? Cette action est irréversible (exporte d\'abord si besoin).'))return;localStorage.removeItem(KEY);S=load();closeSheetSilent();render()},
+ reset(){if(!confirm('Effacer toutes tes données ? Cette action est irréversible (exporte d\'abord si besoin). La synchronisation sera désactivée sur cet appareil, ta copie en ligne n\'est pas touchée.'))return;SY=null;sySave();localStorage.removeItem(KEY);S=load();closeSheetSilent();render()},
 };
 Object.assign(A,{
  discreet(){S.discreet=!S.discreet;save();render();toast(S.discreet?'Mode discret activé 🙈':'Montants visibles 👁')},
@@ -790,6 +833,22 @@ Object.assign(A,{
  buyWish(el){const w=S.wishes.find(x=>x.id===el.dataset.id);if(!w)return;w.status='bought';w.decided=today();S.stats.bought++;closeSheet();toast('Achat réfléchi 👍 Il apparaîtra dans ton prochain point du mois')},
  dropWish(el){const w=S.wishes.find(x=>x.id===el.dataset.id);if(!w)return;w.status='dropped';w.decided=today();S.stats.dropped++;S.stats.droppedAmt+=nz(w.price);if($('#sheet'))closeSheet();else{save();render()}confetti();toast(`🧘 ${eur(nz(w.price))} économisés`)},
  snoozeWish(el){const w=S.wishes.find(x=>x.id===el.dataset.id);if(!w)return;w.added=today();w.cool=7;closeSheet();toast('Encore 7 jours de réflexion')},
+});
+Object.assign(A,{
+ syncSheet(){closeSheetSilent();openSheet(sheetSync())},
+ syncGo(){syncNow(true)},
+ syncOff(){if(!confirm('Désactiver la synchronisation sur cet appareil ? Tes données restent ici et ta copie en ligne n\'est pas supprimée.'))return;SY=null;sySave();closeSheet();toast('Synchronisation désactivée')},
+ async syncOn(){const tok=($('#syTok').value||'').trim(),pass=$('#syPass').value||'',b=$('#syBtn');
+  if(!/^(ghp_|github_pat_)/.test(tok))return toast('Colle la clé GitHub (ghp_…)');if(pass.length<8)return toast('Phrase secrète : 8 caractères minimum');
+  if(!navigator.onLine)return toast('Pas de connexion');b.disabled=true;b.textContent='Connexion…';SY={token:tok,pass,gistId:null,syncedAt:0};
+  try{const id=await findGist();
+   if(id){SY.gistId=id;const rem=await readRemote(),st=rem?await dec(rem,pass):null;
+    if(!st||!st.setup){if(!S.setup)throw new Error('empty');S.updatedAt=S.updatedAt||Date.now();store();await writeRemote()}
+    else{const when=new Date(rem.updated).toLocaleString('fr-FR',{day:'numeric',month:'long',hour:'2-digit',minute:'2-digit'}),newer=rem.updated>=(S.updatedAt||0);
+     if(!S.setup||confirm(`Une copie existe déjà en ligne, modifiée le ${when} (${newer?'plus récente que':'plus ancienne que'} cet appareil).\n\nOK : récupérer la copie en ligne sur cet appareil\nAnnuler : garder cet appareil et remplacer la copie en ligne`))await applyRemote(rem,true);else{S.updatedAt=Date.now();store();await writeRemote()}}}
+   else{if(!S.setup)throw new Error('empty');S.updatedAt=S.updatedAt||Date.now();store();await writeRemote()}
+   sySave();closeSheetSilent();render(true);toast('☁️ Synchronisation activée')}
+  catch(e){SY=null;sySave();b.disabled=false;b.textContent='Activer la synchronisation';toast(e.message==='empty'?'Aucune copie en ligne : active d\'abord la synchro sur l\'appareil qui a tes données':e.message==='token'?'Clé GitHub invalide ou sans la case gist':e.message==='pass'?'Phrase secrète différente de celle de ton autre appareil':'Connexion à GitHub impossible, réessaie')}},
 });
 function closeSheetSilent(){const r=$('#sheet-root');if(r)r.innerHTML='';document.body.classList.remove('noscroll');cleanup()}
 
@@ -823,6 +882,9 @@ document.addEventListener('change',e=>{const el=e.target;
  if(!S.setup&&el.dataset.k&&el.tagName==='SELECT'&&!$('#sheet'))render()});
 document.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target.dataset&&e.target.dataset.k==='af'){e.preventDefault();A.afGo()}if(e.key==='Escape'&&$('#story'))A.storyClose();else if(e.key==='Escape'&&$('#sheet'))closeSheet()});
 render(true);
+if(SY&&SY.gistId)syncNow();
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&SY&&SY.gistId)syncNow()});
+window.addEventListener('online',()=>{if(SY&&SY.gistId)syncNow()});
 if('serviceWorker' in navigator&&location.protocol.startsWith('http'))navigator.serviceWorker.register('sw.js').catch(()=>{});
 </script>
 </body>
