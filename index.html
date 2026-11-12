@@ -528,7 +528,7 @@ function vSetup(){
  if(s===0)h=`<img class="logo" src="icon-192.png" alt=""><h1>Bienvenue sur Plan</h1>
   <p class="muted">On pose ta situation en quelques minutes. Ensuite, <b style="color:var(--tx)">1 minute par mois</b> suffit : tu mets à jour tes soldes, et l'app te dit si tu peux te faire plaisir ou s'il faut freiner.</p>
   <div class="hint">Pas besoin d'avoir tout sous la main. Tout ce que tu sautes maintenant, l'app te le redemandera plus tard.</div>
-  <label class="f"><span>Ton prénom</span><input class="in" data-k="name" value="${val(S.name)}" placeholder="Prénom" autocomplete="given-name"></label>${nav('Commencer')}`;
+  <label class="f"><span>Ton prénom</span><input class="in" data-k="name" value="${val(S.name)}" placeholder="Prénom" autocomplete="given-name"></label>${nav('Commencer')}<button class="btn ghost block" style="margin-top:8px" data-a="import">📂 J'ai déjà une sauvegarde : importer</button>`;
  if(s===1)h=`<h1>Tes revenus</h1><p class="muted">Ton salaire net, celui qui arrive sur ton compte.</p>
   <label class="f"><span>Salaire net mensuel</span>${money('salary',S.salary,'ex. 2 100')}</label>
   <label class="f"><span>Jour de paie (1 à 31)</span><input class="in" data-k="payDay" inputmode="numeric" value="${val(S.payDay)}" placeholder="ex. 28"></label>
